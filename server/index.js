@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
 import pool from './db/connection.js';
+import authRoutes from './routes/auth.js';          // ← NEW
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: resolve(__dirname, '../.env') });
@@ -12,6 +13,8 @@ dotenv.config({ path: resolve(__dirname, '../.env') });
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+app.use('/api/auth', authRoutes);                   // ← NEW
 
 app.get('/api/ping', (req, res) => {
   res.json({ message: 'Server is alive' });
