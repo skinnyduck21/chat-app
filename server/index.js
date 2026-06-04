@@ -11,7 +11,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: resolve(__dirname, '../.env') });
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: 'http://localhost:5173', // Vite's default port
+  credentials: true,
+}));
 app.use(express.json());
 
 app.use('/api/auth', authRoutes);                   // ← NEW
