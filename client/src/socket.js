@@ -1,0 +1,20 @@
+// client/src/socket.js
+import { io } from 'socket.io-client';
+
+// Matches VITE_API_URL in your .env (or falls back to the local dev port).
+const URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+
+const socket = io(URL, {
+  // Don't auto-connect — Chat.jsx calls socket.connect() on mount and
+  // socket.disconnect() on unmount so the lifecycle is explicit.
+  autoConnect: false,
+
+  // Callback form: the token is fetched fresh on every connection attempt,
+  // so a logout → login cycle works correctly without recreating the socket.
+  auth: (cb) => {
+    const token = localStorage.getItem('relay_token');
+    cb({ token });
+  },
+});
+
+export default socket;
