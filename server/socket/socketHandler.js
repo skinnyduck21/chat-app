@@ -4,6 +4,10 @@ import pool from '../db/connection.js';
 
 export default function socketHandler(io) {
 
+  // Tracks per-user typing timeout so the server can auto-clear after 3 s.
+  // Key: user.id  →  Value: setTimeout handle
+  const typingTimers = new Map();
+
   // ── Auth middleware ────────────────────────────────────────────────────────
   // Runs before every connection is accepted.
   io.use((socket, next) => {
@@ -59,9 +63,37 @@ export default function socketHandler(io) {
       }
     });
 
+    // ── typing ─────────────────────────────────────────────────────────────
+    // The client emits this on every keystroke; the server debounces it so
+    // only one broadcast fires per burst, then auto-clears after 3 s of silence.
+    socket.on('typing', () => {
+      if (!typingTimers.has(socket.user.id)) {
+        // First event in this burst — let everyone else know.
+        socket.broadcast.emit('user_typing', socket.user.username);
+      }
+
+      // Reset (or start) the auto-clear countdown.
+      clearTimeout(typingTimers.get(socket.user.id));
+      typingTimers.set(
+        socket.user.id,
+        setTimeout(() => {
+          socket.broadcast.emit('user_stop_typing', socket.user.username);
+          typingTimers.delete(socket.user.id);
+        }, 3000)
+      );
+    });
+
     // ── Disconnect ─────────────────────────────────────────────────────────
     socket.on('disconnect', (reason) => {
       console.log(`🔴 ${socket.user.username} disconnected (${reason})`);
+
+      // If the user was mid-typing, cancel the timer and clear the indicator.
+      if (typingTimers.has(socket.user.id)) {
+        clearTimeout(typingTimers.get(socket.user.id));
+        typingTimers.delete(socket.user.id);
+        socket.broadcast.emit('user_stop_typing', socket.user.username);
+      }
+
       // Emit the *updated* size after this socket is removed.
       io.emit('online_count', io.sockets.sockets.size);
     });

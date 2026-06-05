@@ -1,9 +1,38 @@
-// client/src/pages/Chat.jsx  — Phase 5: live Socket.io chat
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate }  from 'react-router-dom';
 import { useAuth }      from '../context/AuthContext';
 import socket           from '../socket';
 import api              from '../api/axios';
+
+// ─── Toast Container ───────────────────────────────────────────────────────────
+// Toasts appear bottom-right, above the input bar, and auto-dismiss after 4 s.
+function ToastContainer({ toasts }) {
+  if (!toasts.length) return null;
+  return (
+    <div className="fixed bottom-20 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+      {toasts.map(t => (
+        <div
+          key={t.id}
+          className="flex items-center gap-2.5 px-4 py-2.5 rounded-xl
+                     bg-[#1a2234] border border-red-500/30 text-red-400
+                     text-sm shadow-lg backdrop-blur-sm fade-in-up"
+        >
+          {/* Warning icon */}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            className="flex-none opacity-80"
+          >
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          {t.message}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 // ─── Chat Page ─────────────────────────────────────────────────────────────────
 export default function Chat() {
@@ -15,16 +44,47 @@ export default function Chat() {
   const [onlineCount,  setOnlineCount]  = useState(0);
   const [loading,      setLoading]      = useState(true);
   const [historyError, setHistoryError] = useState('');
+  const [toasts,       setToasts]       = useState([]);
+  const [typingUsers,  setTypingUsers]  = useState([]);
 
-  const bottomRef   = useRef(null);
+  const bottomRef  = useRef(null);
   const textareaRef = useRef(null);
+  const mainRef    = useRef(null);   // scroll container — used for nearBottom detection
+  const nearBottom = useRef(true);  // true when the user is at/near the bottom of the feed
 
-  // ── Auto-scroll whenever the message list grows ───────────────────────────
-  const scrollToBottom = useCallback(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // ── Toast helper ──────────────────────────────────────────────────────────
+  const addToast = useCallback((message) => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
 
-  useEffect(() => { scrollToBottom(); }, [messages, scrollToBottom]);
+  // ── Smart scroll ──────────────────────────────────────────────────────────
+  // Only scrolls when the user is already near the bottom, unless force=true
+  // (used right after the initial history fetch so the last message is visible).
+  const scrollToBottom = useCallback((force = false) => {
+    if (force || nearBottom.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, []);
+
+  // Keep nearBottom in sync as the user scrolls through history.
+  const handleScroll = useCallback(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    nearBottom.current = dist < 150;
+  }, []);
+
+  // After history finishes loading, force-scroll once so the latest message shows.
+  useEffect(() => {
+    if (!loading) scrollToBottom(true);
+  }, [loading, scrollToBottom]);
+
+  // For live incoming messages: scroll only when the user is near the bottom.
+  useEffect(() => {
+    if (messages.length) scrollToBottom();
+  }, [messages, scrollToBottom]);
 
   // ── Fetch message history on mount ────────────────────────────────────────
   useEffect(() => {
@@ -52,22 +112,42 @@ export default function Chat() {
       setOnlineCount(count);
     });
 
+    // Surface server-side failures as toasts instead of silent drops.
+    socket.on('error', ({ message }) => {
+      addToast(message || 'Something went wrong. Please try again.');
+    });
+
+    // Typing indicator — server broadcasts username strings.
+    socket.on('user_typing', (username) => {
+      setTypingUsers(prev =>
+        prev.includes(username) ? prev : [...prev, username]
+      );
+    });
+    socket.on('user_stop_typing', (username) => {
+      setTypingUsers(prev => prev.filter(u => u !== username));
+    });
+
     socket.on('connect_error', (err) => {
       console.error('Socket error:', err.message);
-      // Server rejects the JWT → force re-login.
       if (err.message.toLowerCase().includes('authentication')) {
+        // Expired / invalid JWT → force re-login.
         logout();
         navigate('/login');
+      } else {
+        addToast('Connection lost. Reconnecting…');
       }
     });
 
     return () => {
       socket.off('message');
       socket.off('online_count');
+      socket.off('error');
+      socket.off('user_typing');
+      socket.off('user_stop_typing');
       socket.off('connect_error');
       socket.disconnect();
     };
-  }, [logout, navigate]);
+  }, [logout, navigate, addToast]);
 
   // ── Send a message ────────────────────────────────────────────────────────
   const sendMessage = () => {
@@ -92,11 +172,16 @@ export default function Chat() {
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
     }
+    // Notify the server on every keystroke; the server debounces and
+    // auto-clears after 3 s so we never need to emit a "stop typing" event.
+    if (e.target.value.trim() && socket.connected) {
+      socket.emit('typing');
+    }
   };
 
   const handleLogout = () => { logout(); navigate('/login'); };
 
-  // ── Derive display data ───────────────────────────────────────────────────
+  // ── Derived display data ──────────────────────────────────────────────────
   // Group consecutive messages from the same user (within 60 s) to avoid
   // repeating the avatar / username header for every single bubble.
   const grouped = messages.map((msg, i) => {
@@ -108,16 +193,24 @@ export default function Chat() {
     return { ...msg, isGrouped };
   });
 
-  // String comparison handles cases where one side is a number and the other
-  // comes from a JWT payload (also a number, but worth being safe).
   const isOwn = (msg) => String(msg.userId) === String(user?.id);
 
   const fmt = (iso) =>
     new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+  // Build the "X is typing…" label shown below the message list.
+  const typingLabel = (() => {
+    if (!typingUsers.length) return null;
+    if (typingUsers.length === 1) return `${typingUsers[0]} is typing`;
+    if (typingUsers.length === 2) return `${typingUsers[0]} and ${typingUsers[1]} are typing`;
+    return 'Several people are typing';
+  })();
+
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="h-screen bg-[#0a0b14] flex flex-col overflow-hidden">
+
+      <ToastContainer toasts={toasts} />
 
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <header className="flex-none h-14 border-b border-[#1f2937] bg-[#0d1117]/90 backdrop-blur-sm flex items-center justify-between px-5 z-10">
@@ -142,7 +235,7 @@ export default function Chat() {
             </span>
           </div>
 
-          {/* Online indicator (hidden on very small screens) */}
+          {/* Online count — hidden on very small screens */}
           <div className="hidden sm:flex items-center gap-1.5 pl-3 border-l border-[#1f2937] ml-0.5">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             <span className="text-slate-400 text-xs">
@@ -171,8 +264,11 @@ export default function Chat() {
       </header>
 
       {/* ── Message area ────────────────────────────────────────────────── */}
-      <main className="flex-1 overflow-y-auto px-4 py-4">
-
+      <main
+        ref={mainRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-4 py-4"
+      >
         {loading ? (
           /* Loading spinner */
           <div className="flex items-center justify-center h-full gap-2 text-slate-500 text-sm">
@@ -219,10 +315,35 @@ export default function Chat() {
                 fmt={fmt}
               />
             ))}
+
+            {/* Typing indicator — aligned with the left-side bubble content area */}
+            {typingLabel && (
+              <div className="flex items-center gap-2.5 mt-3">
+                {/* Spacer matching the avatar column */}
+                <div className="flex-none w-7" />
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce"
+                      style={{ animationDelay: '0ms' }}
+                    />
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce"
+                      style={{ animationDelay: '150ms' }}
+                    />
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce"
+                      style={{ animationDelay: '300ms' }}
+                    />
+                  </div>
+                  <span className="text-slate-500 text-xs">{typingLabel}</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Invisible anchor — we scrollIntoView this after each new message */}
+        {/* Invisible anchor — scrollIntoView targets this after each new message */}
         <div ref={bottomRef} />
       </main>
 
@@ -270,16 +391,29 @@ export default function Chat() {
 }
 
 // ─── Message Bubble ────────────────────────────────────────────────────────────
+// Hover timestamps: non-grouped bubbles already show a static timestamp.
+// For grouped bubbles (no header), a timestamp is absolutely-positioned above
+// the bubble and fades in on group hover — no layout shift.
 function MessageBubble({ msg, own, fmt }) {
   if (own) {
     return (
-      <div className={`flex flex-col items-end ${msg.isGrouped ? 'mt-0.5' : 'mt-4'}`}>
+      <div className={`flex flex-col items-end ${msg.isGrouped ? 'mt-0.5' : 'mt-4'} group`}>
+
+        {/* Non-grouped: persistent timestamp above bubble */}
         {!msg.isGrouped && (
           <span className="text-[11px] text-slate-600 mb-1 mr-1">
             {fmt(msg.createdAt)}
           </span>
         )}
-        <div className="max-w-[70%] bg-indigo-600 text-white px-3.5 py-2 rounded-2xl rounded-tr-sm text-sm leading-relaxed break-words">
+
+        {/* Bubble — relative so the hover-timestamp can anchor to it */}
+        <div className="relative max-w-[70%] bg-indigo-600 text-white px-3.5 py-2 rounded-2xl rounded-tr-sm text-sm leading-relaxed break-words">
+          {/* Grouped: hover-only timestamp floats above the bubble */}
+          {msg.isGrouped && (
+            <span className="absolute -top-5 right-0 text-[10px] text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity duration-150 whitespace-nowrap pointer-events-none">
+              {fmt(msg.createdAt)}
+            </span>
+          )}
           {msg.content}
         </div>
       </div>
@@ -287,7 +421,7 @@ function MessageBubble({ msg, own, fmt }) {
   }
 
   return (
-    <div className={`flex items-end gap-2.5 ${msg.isGrouped ? 'mt-0.5' : 'mt-4'}`}>
+    <div className={`flex items-end gap-2.5 ${msg.isGrouped ? 'mt-0.5' : 'mt-4'} group`}>
 
       {/* Avatar — shown only on the first bubble of a group */}
       {!msg.isGrouped ? (
@@ -299,13 +433,22 @@ function MessageBubble({ msg, own, fmt }) {
       )}
 
       <div className="flex flex-col items-start max-w-[70%]">
+        {/* Non-grouped: username + persistent timestamp */}
         {!msg.isGrouped && (
           <div className="flex items-baseline gap-2 mb-1 ml-0.5">
             <span className="text-xs font-semibold text-slate-300">{msg.username}</span>
             <span className="text-[11px] text-slate-600">{fmt(msg.createdAt)}</span>
           </div>
         )}
-        <div className="bg-[#1a2234] border border-[#252d3d] text-slate-200 px-3.5 py-2 rounded-2xl rounded-tl-sm text-sm leading-relaxed break-words">
+
+        {/* Bubble — relative so the hover-timestamp can anchor to it */}
+        <div className="relative bg-[#1a2234] border border-[#252d3d] text-slate-200 px-3.5 py-2 rounded-2xl rounded-tl-sm text-sm leading-relaxed break-words">
+          {/* Grouped: hover-only timestamp floats above the bubble */}
+          {msg.isGrouped && (
+            <span className="absolute -top-5 left-0 text-[10px] text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity duration-150 whitespace-nowrap pointer-events-none">
+              {fmt(msg.createdAt)}
+            </span>
+          )}
           {msg.content}
         </div>
       </div>

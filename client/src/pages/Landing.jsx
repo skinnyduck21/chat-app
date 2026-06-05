@@ -44,7 +44,7 @@ export default function Landing() {
       </div>
 
       <p className="fade-in-up-2 mt-10 text-slate-600 text-sm">
-        Portfolio project · Phase 3 complete
+        Relay Chat · Version 1.0.0
       </p>
     </div>
   );
